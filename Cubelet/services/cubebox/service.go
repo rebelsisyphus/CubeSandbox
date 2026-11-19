@@ -1186,8 +1186,12 @@ func toGRPCCubeBox(box *cubeboxstore.CubeBox, opt *cubebox.ListCubeSandboxOption
 		PortMappings: box.PortMappings,
 		CreatedAt:    box.CreatedAt,
 		Labels:       maps.Clone(box.Labels),
-		NumaNode:     box.NumaNode,
+		NumaNode:     effectiveNumaNode(box),
 	}
+	if cb.Labels == nil {
+		cb.Labels = make(map[string]string)
+	}
+	addNumaPlacementLabels(cb.Labels, box)
 
 	if status := box.MainStatus(); status != nil {
 		stored := status.Get()

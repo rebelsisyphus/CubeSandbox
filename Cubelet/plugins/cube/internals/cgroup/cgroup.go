@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"strings"
 	"time"
 
 	jsoniter "github.com/json-iterator/go"
@@ -224,7 +225,11 @@ func SetCubeboxCgroupLimit(ctx context.Context, group string, cpuQ resource.Quan
 }
 
 func AddProc(path string, pid uint64) error {
-	if l.poolV1Handle == nil {
+	h := l.poolV1Handle
+	if strings.HasPrefix(path, handle.DefaultPathPoolV2) {
+		h = l.poolV2Handle
+	}
+	if h == nil {
 		return fmt.Errorf("cgroup plugin not initialized")
 	}
 	var err error
@@ -236,7 +241,7 @@ func AddProc(path string, pid uint64) error {
 			delay *= 2
 		}
 
-		if err = l.poolV1Handle.AddProc(path, pid); err == nil {
+		if err = h.AddProc(path, pid); err == nil {
 			return nil
 		}
 	}

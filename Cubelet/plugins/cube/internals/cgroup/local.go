@@ -340,8 +340,14 @@ func (l *CgPlugin) Create(ctx context.Context, opts *workflow.CreateContext) (er
 	// Per-NUMA pool: the sandbox cgroup is created under numa<N> and inherits
 	// that node's cpuset.cpus / cpuset.mems, which is what makes the placement
 	// picked in resource.go bind CPU cores and memory instead of being a label.
+	requestedNuma := opts.GetNumaNode()
 	usePoolV2 := l.config.NumaAffinityEnabled()
-	numa := opts.GetNumaNode()
+	effectiveNuma := int32(-1)
+	fallbackReason := "numa_affinity_disabled"
+	if usePoolV2 {
+		effectiveNuma = requestedNuma
+		fallbackReason = ""
+	}
 
 	defer func() {
 		if err != nil && fullCgID != nil {
@@ -370,7 +376,7 @@ func (l *CgPlugin) Create(ctx context.Context, opts *workflow.CreateContext) (er
 	}
 	l.vmSpecLock.RUnlock()
 
-	fullCgID, err = l.pool.Get(ctx, opts.GetSandboxID(), usePoolV2, numa)
+	fullCgID, err = l.pool.Get(ctx, opts.GetSandboxID(), usePoolV2, requestedNuma)
 	if err != nil {
 		return ret.Errorf(errorcode.ErrorCode_CreateCgroupFailed, "%s", err)
 	}
@@ -382,6 +388,10 @@ func (l *CgPlugin) Create(ctx context.Context, opts *workflow.CreateContext) (er
 		return ret.Errorf(errorcode.ErrorCode_CreateCgroupFailed, "failed save to db: %v", err)
 	}
 
+	// Downstream steps (storage, rollback, shim annotation, CubeBox metadata)
+	// must use the node where placement actually succeeded. When the NUMA
+	// affinity switch is off, cgroup v1 has no placement at all.
+	opts.NumaNode = effectiveNuma
 	opts.CgroupInfo = &Info{
 		CgroupID:                               cgroupPath,
 		ResourceQuantity:                       *resourceQuantity,
@@ -389,6 +399,9 @@ func (l *CgPlugin) Create(ctx context.Context, opts *workflow.CreateContext) (er
 		UsePoolV2:                              usePoolV2,
 		HostMetricsBaseline:                    baseline,
 		HostMetricsBaselineMissingAtAssignment: baseline == nil,
+		RequestedNumaNode:                      requestedNuma,
+		EffectiveNumaNode:                      effectiveNuma,
+		FallbackReason:                         fallbackReason,
 	}
 
 	return nil
@@ -570,4 +583,7 @@ type Info struct {
 	UsePoolV2                              bool
 	HostMetricsBaseline                    *cubeboxstore.HostMetricsBaseline
 	HostMetricsBaselineMissingAtAssignment bool
+	RequestedNumaNode                      int32
+	EffectiveNumaNode                      int32
+	FallbackReason                         string
 }

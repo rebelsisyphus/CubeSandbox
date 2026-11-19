@@ -32,6 +32,9 @@ pub const ANNO_SNAPSHOT_BASE: &str = "cube.vm.snapshot.base.path";
 pub const ANNO_SNAPSHOT_MEMORY_VOL_URL: &str = "cube.vm.snapshot.memory_vol_url";
 pub const ANNO_APP_SNAPSHOT_CREATE: &str = "cube.appsnapshot.create";
 pub const ANNO_APP_SNAPSHOT_RESTORE: &str = "cube.appsnapshot.restore";
+/// Host pool cgroup assigned by Cubelet; present only when the early join is
+/// needed (for example, a cpuset-constrained restore).
+pub const ANNO_SANDBOX_CGROUP_PATH: &str = "cube.sandbox_cgroup_path";
 /// Present on CoW pause/resume recreates. Guest virtiofs mounts are already
 /// live in restored memory; shim must reconnect host virtiofs devices but must
 /// not replay virtio-fs storages to the agent (remount → EBUSY).
@@ -71,6 +74,8 @@ pub struct Config {
     pub notify_snapshot_ret: bool,
     pub app_snapshot_create: bool,
     pub app_snapshot_restore: bool,
+    /// Host pool cgroup path for the pre-VMM join; absent means skip it.
+    pub cgroup_path: Option<String>,
     pub use_passfd_io: bool,
     /// Extra kernel cmdline parameters injected through annotations.
     pub extra_kernel_params: Vec<String>,
@@ -101,6 +106,7 @@ impl Default for Config {
             notify_snapshot_ret: false,
             app_snapshot_create: false,
             app_snapshot_restore: false,
+            cgroup_path: None,
             use_passfd_io: false,
             extra_kernel_params: Vec::new(),
         }
@@ -233,6 +239,10 @@ impl Config {
         if let Some(anno) = anno.get(ANNO_VIRTIOFS) {
             virtiofs = Utils::anno_to_obj::<Vec<VirtioFs>>(anno)?;
         }
+        let cgroup_path = anno
+            .get(ANNO_SANDBOX_CGROUP_PATH)
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty());
         let extra_kernel_params = if let Some(params) = anno.get(ANNO_VM_KERNEL_CMDLINE_APPEND) {
             let params_vec = Utils::anno_to_obj::<Vec<String>>(params)?;
             params_vec
@@ -273,6 +283,7 @@ impl Config {
             notify_snapshot_ret,
             app_snapshot_create,
             app_snapshot_restore,
+            cgroup_path,
             use_passfd_io,
             extra_kernel_params,
         };

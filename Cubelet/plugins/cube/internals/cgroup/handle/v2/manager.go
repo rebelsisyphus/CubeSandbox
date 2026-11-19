@@ -71,14 +71,40 @@ func (h *handler) Create(ctx context.Context, group string) error {
 func (h *handler) CreateWithCpuSet(ctx context.Context, group string, cpuset string, numaId int) error {
 	cpuResource := &cgroup2.CPU{}
 	if cpuset != "" {
-
 		cpuResource.Cpus = cpuset
-		cpuResource.Mems = fmt.Sprintf("%d", numaId)
+		// Binding all first-touch pages to one node triggers a kernel
+		// migrate_mm workqueue hang on the current 7.3 test kernel.
+		// Use -1 to keep CPU placement (cpuset.cpus) and leave memory
+		// placement to the host scheduler.
+		if numaId >= 0 {
+			cpuResource.Mems = fmt.Sprintf("%d", numaId)
+		}
 	}
-	return h.createWithResource(ctx, group, &cgroup2.Resources{
+	if err := h.createWithResource(ctx, group, &cgroup2.Resources{
 		CPU:    cpuResource,
 		Memory: &cgroup2.Memory{},
-	})
+	}); err != nil {
+		return err
+	}
+	if numaId < 0 {
+		if err := os.WriteFile(filepath.Join(h.root, group, "cpuset.mems"), nil, 0644); err != nil {
+			return fmt.Errorf("clear cpuset.mems for %s: %w", group, err)
+		}
+	}
+	// The NUMA pool cgroup owns the node's cpuset. Child sandbox cgroups only
+	// inherit it when cpuset is also enabled in this group's subtree_control;
+	// createWithResource deliberately skips the target group itself.
+	subtree := filepath.Join(h.root, group, "cgroup.subtree_control")
+	if data, err := os.ReadFile(subtree); err == nil {
+		if !strings.Contains(string(data), "cpuset") {
+			if err := os.WriteFile(subtree, []byte("+cpuset"), 0644); err != nil {
+				return fmt.Errorf("enable cpuset subtree for %s: %w", group, err)
+			}
+		}
+	} else {
+		return fmt.Errorf("read cpuset subtree for %s: %w", group, err)
+	}
+	return nil
 }
 
 func (h *handler) createWithResource(ctx context.Context, group string, res *cgroup2.Resources) error {

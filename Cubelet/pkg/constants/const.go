@@ -105,6 +105,9 @@ const (
 
 	CubeProbeId = "probe"
 
+	CubeNumaPlacementId = "numa-placement"
+	CubeNumaFallbackId  = "numa-fallback"
+
 	CubeNewContainerId = "new-metadata"
 
 	CubeDelContainerId = "del-metadata"

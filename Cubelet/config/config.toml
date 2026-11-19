@@ -219,7 +219,7 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
         actions = [["cleanup"],["cubebox"],["images","storage","cgroup","network","volume", "netfile", "cube-sandbox-store"]]
       [plugins."io.cubelet.workflow.v1.workflow".flows.create]
         concurrent = 100
-        actions = [["createid", "appsnapshot"],["images","volume","storage","network","netfile", "cube-sandbox-store"],["cgroup"],["cubebox"]]
+        actions = [["createid", "appsnapshot"],["images","volume","network","netfile", "cube-sandbox-store"],["cgroup"],["storage"],["cubebox"]]
       [plugins."io.cubelet.workflow.v1.workflow".flows.destroy]
         concurrent = 100
         actions = [["cubebox"],["images","storage","cgroup","network","volume","netfile", "cube-sandbox-store"],["cleanup"]]

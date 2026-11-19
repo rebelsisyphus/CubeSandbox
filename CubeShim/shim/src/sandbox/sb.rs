@@ -629,6 +629,7 @@ impl SandBox {
     }
 
     pub async fn create_sandbox(&mut self, trace: &Trace) -> CResult<()> {
+        self.join_host_cgroup();
         let snapshot = self.start_vm(trace).await?;
 
         //todo: app snapshot
@@ -1039,6 +1040,24 @@ impl SandBox {
 
         !self.conf.app_snapshot_create
     }
+    fn join_host_cgroup(&self) {
+        if let Some(path) = self.conf.cgroup_path.as_deref() {
+            match super::host_cgroup::join(path) {
+                Ok(()) => infof!(
+                    self.log,
+                    "host cgroup {} joined before vmm launch",
+                    path
+                ),
+                Err(e) => warnf!(
+                    self.log,
+                    "host cgroup {} early join failed: {}",
+                    path,
+                    e
+                ),
+            }
+        }
+    }
+
     async fn start_vm(&mut self, trace: &Trace) -> CResult<bool> {
         infof!(self.log, "start vm start");
         {

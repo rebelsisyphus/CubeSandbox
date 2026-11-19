@@ -516,8 +516,16 @@ func applyCgroupInfoToCubeBox(sandBox *cubeboxstore.CubeBox, info *cgroupp.Info)
 	}
 	sandBox.ResourceWithOverHead = &info.ResourceQuantity
 	sandBox.CGroupPath = info.CgroupID
+	sandBox.NumaNode = info.EffectiveNumaNode
 	sandBox.RestoreHostMetricsBaseline(info.HostMetricsBaseline)
 	sandBox.HostMetricsBaselineMissingAtAssignment = info.HostMetricsBaselineMissingAtAssignment
+	if sandBox.Labels == nil {
+		sandBox.Labels = make(map[string]string)
+	}
+	sandBox.Labels[constants.LabelNumaNode] = fmt.Sprintf("%d", info.EffectiveNumaNode)
+	if info.FallbackReason != "" {
+		sandBox.Labels["cube.numa_fallback_reason"] = info.FallbackReason
+	}
 }
 
 func (l *local) cleanupAfterEnvdInitFailure(flowOpts *workflow.CreateContext,
@@ -588,6 +596,12 @@ func (l *local) genSandboxOptions(ctx context.Context, realReq *cubebox.RunCubeS
 	err = l.genImageReferenceForCubebox(ctx, flowOpts, sandBox)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate image reference for cubebox: %w", err)
+	}
+	// Host pool cgroup for this sandbox: the shim joins it before the VMM
+	// starts when the cgroup has a cpuset constraint. Appended last so a
+	// request-side same-key annotation cannot win.
+	if anno := sandboxCgroupPathAnnotation(ctx, flowOpts); anno != nil {
+		additionalSandboxOpt = append(additionalSandboxOpt, oci.WithAnnotations(anno))
 	}
 	return additionalSandboxOpt, nil
 }
@@ -1420,10 +1434,29 @@ func (l *local) prepareWritableRootfs(ctx context.Context, flowOpts *workflow.Cr
 	return oci.WithAnnotations(annotations), nil
 }
 
+func processInCgroup(pid uint32, group string) bool {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", pid))
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		parts := strings.SplitN(line, ":", 3)
+		if len(parts) == 3 && strings.TrimSpace(parts[2]) == group {
+			return true
+		}
+	}
+	return false
+}
+
 func setCgroup(ctx context.Context, pid uint32, group string) {
+	if processInCgroup(pid, group) {
+		log.G(ctx).Debugf("shim pid %d already in cgroup %s; skip late move", pid, group)
+		return
+	}
 	err := cgroupp.AddProc(group, uint64(pid))
 	if err != nil {
 		log.G(ctx).Errorf("add shim pid %d to cgroup %s failed: %v", pid, group, err)
+		return
 	}
 	log.G(ctx).Debugf("set cgroup proc success, pid: %d, cgroup: %s", pid, group)
 }
