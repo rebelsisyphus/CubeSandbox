@@ -389,6 +389,9 @@ func CleanupObjectsFor(ctx context.Context, backend string, refs []CowObjectRef)
 			}
 			continue
 		}
+		if strings.EqualFold(strings.TrimSpace(ref.Role), "memory_replica") {
+			recordMemoryReplicaDeleted()
+		}
 		if isXFSCleanupBackend(backend) {
 			if err := removeLegacyXfsCowObjectIfGone(ctx, name); err != nil {
 				cleanupErr = errors.Join(cleanupErr, fmt.Errorf("cleanup legacy cubecow object %q: %w", name, err))

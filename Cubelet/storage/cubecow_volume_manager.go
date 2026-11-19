@@ -263,6 +263,37 @@ func (m *XfsCow) CommitTemplateMemory(ctx context.Context, sourceName, templateI
 	return newCowVolumeWithSize(snapshotName, cowKindSnapshot, 0, devPath, actual), nil
 }
 
+// CreateTemplateMemoryReplica creates (or reuses) a reflink clone of a full
+// snapshot memory object under replicaName. The clone has its own inode, so
+// page-cache pages faulted by sandboxes on that NUMA node stay local.
+func (m *XfsCow) CreateTemplateMemoryReplica(ctx context.Context, sourceName, sourceKind, replicaName string) (*cowVolume, error) {
+	sourceName = strings.TrimSpace(sourceName)
+	replicaName = strings.TrimSpace(replicaName)
+	if sourceName == "" || replicaName == "" {
+		return nil, fmt.Errorf("memory replica source and name are required")
+	}
+	devPath, err := m.engine.CreateSnapshotFromVolume(sourceName, replicaName, true)
+	if err != nil {
+		if !isCowSemantic(err, cubecow.SemAlreadyExists) {
+			return nil, err
+		}
+		// The origin check is valid for volume sources. A snapshot source is
+		// flattened by cubecow to its ultimate origin, so list_snapshots()
+		// cannot verify it; resolve the existing object and verify its path.
+		kind, normalizeErr := normalizeCowKind(sourceKind)
+		if normalizeErr != nil || kind == cowKindVolume {
+			if err := m.ensureSnapshotOrigin(sourceName, replicaName); err != nil {
+				return nil, err
+			}
+		}
+		devPath, err = m.ResolveDevPath(ctx, replicaName, cowKindSnapshot)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return newCowVolume(replicaName, cowKindSnapshot, 0, devPath), nil
+}
+
 // CloneSandboxMemory is kept on the Store interface. XFS restore no
 // longer calls it (see prefetchRestoreMemoryVolURL); S3 pause resume
 // still does via S3Cow.

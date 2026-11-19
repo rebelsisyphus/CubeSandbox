@@ -21,6 +21,7 @@ import (
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/telemetry"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
@@ -176,6 +177,31 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 		rsp.Ret.RetMsg = err.Error()
 		return rsp, nil
 	}
+	canonicalMemoryVol := memoryVol
+	restoreMemoryVol, restoreMemoryKind := memoryVol, memoryKind
+	if strings.TrimSpace(req.GetMemoryVol()) == "" {
+		if normalizedBackend, backendErr := cow.NormalizeBackend(backend); backendErr == nil && normalizedBackend == cow.BackendXFS && effectiveNumaNode(cb) >= 0 && storage.NumaMemoryReplicaEnabledForConfig() {
+			entry, entryErr := storage.GetLocalSnapshotFor(ctx, backend, req.GetSnapshotID())
+			if entryErr == nil && entry != nil {
+				if replicaVol, replicaKind, used := storage.SelectSnapshotMemory(entry, effectiveNumaNode(cb)); used {
+					storage.RecordMemoryReplicaAcquire("hit")
+					restoreMemoryVol, restoreMemoryKind = replicaVol, replicaKind
+				} else if storage.NumaMemoryReplicaEligible(entry) {
+					updated, created, ensureErr := storage.EnsureSnapshotMemoryReplica(ctx, backend, req.GetSnapshotID(), effectiveNumaNode(cb))
+					if ensureErr != nil {
+						stepLog.Warnf("rollback: cannot create NUMA%d memory replica, using canonical: %v", effectiveNumaNode(cb), ensureErr)
+					} else if created && updated != nil {
+						if replicaVol, replicaKind, used := storage.SelectSnapshotMemory(updated, effectiveNumaNode(cb)); used {
+							storage.RecordMemoryReplicaAcquire("hit")
+							restoreMemoryVol, restoreMemoryKind = replicaVol, replicaKind
+						}
+					}
+				}
+			} else if entryErr != nil {
+				stepLog.Warnf("rollback: NUMA memory replica catalog lookup failed, using canonical: %v", entryErr)
+			}
+		}
+	}
 
 	// S3 Finalize unmounts package metadata. Restore reads
 	// <meta>/snapshot/{config,state}.json from that disk, so clone the sealed
@@ -213,7 +239,7 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 	}
 	rsp.OldRootfsVol = currentRootfs.Name
 
-	refs, err := storage.ResolveRollbackRefsFor(prepareCtx, backend, rootfsVol, memoryVol, memoryKind)
+	refs, err := storage.ResolveRollbackRefsFor(prepareCtx, backend, rootfsVol, restoreMemoryVol, restoreMemoryKind)
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to resolve snapshot objects: %v", err)
@@ -320,7 +346,7 @@ func (s *service) RollbackSandbox(ctx context.Context, req *cubebox.RollbackSand
 	rsp.RootfsKind = newRootfs.Kind
 	rsp.RootfsDev = newRootfs.DevPath
 	rsp.NewGen = newRootfs.Gen
-	rsp.MemoryVol = refs.Memory.Name
+	rsp.MemoryVol = canonicalMemoryVol
 	if err := activateAndPersistRollbackGuestMetricsEpoch(
 		finalizeCtx,
 		s.cubeboxMgr.cubeboxManger,

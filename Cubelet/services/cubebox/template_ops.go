@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"sort"
 	"strings"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
@@ -510,22 +511,32 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	// guest after every snapshot; legacy templates without the annotation keep
 	// the previous best-effort behavior of returning an empty version.
 	rsp.EnvdVersion = envdVersionFromCubeBox(cb)
+	var numaMemoryReplicas map[string]storage.SnapshotMemoryReplica
+	if snapshotTypeForCmd == snapshotTypeFull && payload.HasMemory() {
+		replicas, replicaErr := storage.CreateMemoryReplicasForFullSnapshot(ctx, backend, rsp.TemplateID, payload.memory)
+		if replicaErr != nil {
+			stepLog.Warnf("failed to create NUMA memory replicas for %s: %v", rsp.TemplateID, replicaErr)
+		}
+		numaMemoryReplicas = replicas
+	}
 	if err := storage.WriteSnapshotCatalogFor(backend, &storage.SnapshotCatalogEntry{
-		SnapshotID:        rsp.TemplateID,
-		InstanceType:      "cubebox",
-		SpecDir:           specDir,
-		SnapshotPath:      layout.Home,
-		MetaDir:           layout.MetaDir,
-		RootfsVol:         rootfsObject.Name,
-		RootfsKind:        rootfsObject.Kind,
-		MemoryVol:         payload.MemoryVol(),
-		MemoryKind:        payload.MemoryKind(),
-		MetadataVol:       storage.S3MetadataCatalogVol(backend, rsp.TemplateID),
-		MetadataKind:      storage.S3MetadataCatalogKind(backend),
-		RootfsSizeBytes:   rootfsObject.SizeBytes,
-		ComponentVersions: cloneStringMap(cb.ComponentVersions),
-		Kind:              storage.CatalogKindRuntimeSnapshot,
-		Backend:           backend,
+		SnapshotID:         rsp.TemplateID,
+		InstanceType:       "cubebox",
+		SpecDir:            specDir,
+		SnapshotPath:       layout.Home,
+		MetaDir:            layout.MetaDir,
+		RootfsVol:          rootfsObject.Name,
+		RootfsKind:         rootfsObject.Kind,
+		MemoryVol:          payload.MemoryVol(),
+		MemoryKind:         payload.MemoryKind(),
+		MemorySnapshotType: snapshotTypeForCmd,
+		NumaMemoryReplicas: numaMemoryReplicas,
+		MetadataVol:        storage.S3MetadataCatalogVol(backend, rsp.TemplateID),
+		MetadataKind:       storage.S3MetadataCatalogKind(backend),
+		RootfsSizeBytes:    rootfsObject.SizeBytes,
+		ComponentVersions:  cloneStringMap(cb.ComponentVersions),
+		Kind:               storage.CatalogKindRuntimeSnapshot,
+		Backend:            backend,
 	}); err != nil {
 		// Catalog write failures do not invalidate the snapshot: master will
 		// still receive the physical references in the response and rollback
@@ -1010,6 +1021,13 @@ func resolveCleanupRefs(ctx context.Context, backend, templateID string, objects
 		if err != nil {
 			return nil, "", err
 		}
+		// Legacy master callers do not know about NUMA replicas. Merge the
+		// local catalog (when available) and actual XFS objects so replicas
+		// created by this node are not leaked during a rolling upgrade.
+		if entry, lookupErr := storage.GetLocalSnapshotFor(ctx, backend, templateID); lookupErr == nil && entry != nil {
+			refs = mergeCleanupRefs(refs, cubecowRefsFromCatalogEntry(templateID, entry))
+		}
+		refs = appendXFSReplicaCleanupRefs(ctx, backend, templateID, refs)
 		return finalizeCleanupRefs(backend, templateID, refs), ensureSnapshotCleanupPath(ctx, backend, templateID, callerSnapshotPath), nil
 	}
 	entry, err := storage.GetLocalSnapshotFor(ctx, backend, templateID)
@@ -1022,6 +1040,7 @@ func resolveCleanupRefs(ctx context.Context, backend, templateID string, objects
 	}
 	if err == nil && entry != nil {
 		refs := cubecowRefsFromCatalogEntry(templateID, entry)
+		refs = appendXFSReplicaCleanupRefs(ctx, backend, templateID, refs)
 		snapshotPath := strings.TrimSpace(entry.SnapshotPath)
 		if snapshotPath == "" {
 			snapshotPath = callerSnapshotPath
@@ -1033,7 +1052,40 @@ func resolveCleanupRefs(ctx context.Context, backend, templateID string, objects
 	} else {
 		log.G(ctx).Warnf("CleanupTemplate %s: catalog miss; falling back to deterministic refs", templateID)
 	}
-	return finalizeCleanupRefs(backend, templateID, storage.DefaultTemplateObjectRefs(templateID)), ensureSnapshotCleanupPath(ctx, backend, templateID, callerSnapshotPath), nil
+	refs := storage.DefaultTemplateObjectRefs(templateID)
+	refs = appendXFSReplicaCleanupRefs(ctx, backend, templateID, refs)
+	return finalizeCleanupRefs(backend, templateID, refs), ensureSnapshotCleanupPath(ctx, backend, templateID, callerSnapshotPath), nil
+}
+
+func mergeCleanupRefs(dst, src []storage.CowObjectRef) []storage.CowObjectRef {
+	seen := make(map[string]struct{}, len(dst)+len(src))
+	out := make([]storage.CowObjectRef, 0, len(dst)+len(src))
+	for _, ref := range append(dst, src...) {
+		name := strings.TrimSpace(ref.Name)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		ref.Name = name
+		out = append(out, ref)
+	}
+	return out
+}
+
+func appendXFSReplicaCleanupRefs(ctx context.Context, backend, templateID string, refs []storage.CowObjectRef) []storage.CowObjectRef {
+	normalized, err := cow.NormalizeBackend(backend)
+	if err != nil || normalized != cow.BackendXFS {
+		return refs
+	}
+	replicas, err := storage.EnumerateXFSMemoryReplicaRefs(templateID)
+	if err != nil {
+		log.G(ctx).Warnf("CleanupTemplate %s: cannot enumerate XFS memory replicas: %v", templateID, err)
+		return refs
+	}
+	return mergeCleanupRefs(refs, replicas)
 }
 
 func finalizeCleanupRefs(backend, templateID string, refs []storage.CowObjectRef) []storage.CowObjectRef {
@@ -1087,7 +1139,7 @@ func cubecowRefsFromCatalogEntry(templateID string, entry *storage.SnapshotCatal
 	if entry == nil {
 		return storage.DefaultTemplateObjectRefs(templateID)
 	}
-	refs := make([]storage.CowObjectRef, 0, 3)
+	refs := make([]storage.CowObjectRef, 0, 3+len(entry.NumaMemoryReplicas))
 	if name := strings.TrimSpace(entry.RootfsVol); name != "" {
 		refs = append(refs, storage.CowObjectRef{Name: name, Kind: entry.RootfsKind, Role: "rootfs"})
 	}
@@ -1103,6 +1155,23 @@ func cubecowRefsFromCatalogEntry(templateID string, entry *storage.SnapshotCatal
 			kind = storage.CowKindSnapshot
 		}
 		refs = append(refs, storage.CowObjectRef{Name: name, Kind: kind, Role: "metadata"})
+	}
+	nodes := make([]string, 0, len(entry.NumaMemoryReplicas))
+	for node := range entry.NumaMemoryReplicas {
+		nodes = append(nodes, node)
+	}
+	sort.Strings(nodes)
+	for _, node := range nodes {
+		replica := entry.NumaMemoryReplicas[node]
+		name := strings.TrimSpace(replica.Volume)
+		if name == "" {
+			continue
+		}
+		kind := strings.TrimSpace(replica.Kind)
+		if kind == "" {
+			kind = storage.CowKindSnapshot
+		}
+		refs = append(refs, storage.CowObjectRef{Name: name, Kind: kind, Role: "memory_replica"})
 	}
 	if len(refs) == 0 {
 		return storage.DefaultTemplateObjectRefs(templateID)

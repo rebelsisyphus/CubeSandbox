@@ -116,6 +116,13 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
     # Default storage backend: cubecow (reflink-only copy-on-write).
     storage_backend = "cubecow"
 
+    # XFS-only NUMA memory snapshot replicas. Disabled by default; enable on
+    # multi-NUMA hosts after verifying reflink support and the memory profile.
+    # A storage root must be owned by exactly one Cubelet process.
+    # mode: off|per_node. create_on: snapshot|first_restore.
+    numa_memory_replica_mode = "off"
+    numa_memory_replica_create_on = "snapshot"
+
     # Working directory for the cubelet storage plugin. cubecow reflink volumes land at
     # <data_path>/xfs/objects, so the filesystem backing data_path must support
     # FICLONE (e.g. xfs with `-m reflink=1` or btrfs).

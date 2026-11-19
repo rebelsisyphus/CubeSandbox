@@ -50,6 +50,12 @@ type SnapshotCatalogEntry struct {
 	RootfsKind   string `json:"rootfs_kind"`
 	MemoryVol    string `json:"memory_vol"`
 	MemoryKind   string `json:"memory_kind"`
+	// MemorySnapshotType records the capture mode used for MemoryVol:
+	// full, incremental or soft-dirty. Empty on legacy entries.
+	MemorySnapshotType string `json:"memory_snapshot_type,omitempty"`
+	// NumaMemoryReplicas maps a host NUMA node id (decimal string) to a
+	// reflink clone of MemoryVol dedicated to that node. XFS only.
+	NumaMemoryReplicas map[string]SnapshotMemoryReplica `json:"numa_memory_replicas,omitempty"`
 	// MetadataVol/Kind is the S3 package metadata volume (cloned from the
 	// node-local base snapshot or a parent package metadata volume).
 	// Empty on XFS (plain directory). The node-local base volume/snapshot
@@ -97,6 +103,14 @@ const (
 	// sandbox from this catalog entry with the same sandboxID.
 	CatalogKindPauseSnapshot = "pause_snapshot"
 )
+
+// SnapshotMemoryReplica identifies a NUMA-local reflink clone of a snapshot's
+// canonical memory object. Kind is the cubecow object kind (snapshot for
+// FICLONE clones).
+type SnapshotMemoryReplica struct {
+	Volume string `json:"volume"`
+	Kind   string `json:"kind"`
+}
 
 // SnapshotCatalogEntryResolved enriches a catalog entry with freshly re-resolved
 // cubecow device paths.
@@ -516,6 +530,12 @@ func cloneCatalogEntry(in *SnapshotCatalogEntry) *SnapshotCatalogEntry {
 		out.ComponentVersions = make(map[string]string, len(in.ComponentVersions))
 		for k, v := range in.ComponentVersions {
 			out.ComponentVersions[k] = v
+		}
+	}
+	if in.NumaMemoryReplicas != nil {
+		out.NumaMemoryReplicas = make(map[string]SnapshotMemoryReplica, len(in.NumaMemoryReplicas))
+		for node, replica := range in.NumaMemoryReplicas {
+			out.NumaMemoryReplicas[node] = replica
 		}
 	}
 	return &out

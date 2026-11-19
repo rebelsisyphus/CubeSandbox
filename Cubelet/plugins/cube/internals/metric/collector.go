@@ -13,6 +13,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	metrictypes "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/metric/types"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 )
 
 const (
@@ -33,6 +34,11 @@ type schedulerCollector struct {
 	descNicQueues          *prom.Desc
 	descRealtimeCreateNum  *prom.Desc
 	descRealtimeDestroyNum *prom.Desc
+
+	descMemoryReplicaAcquire  *prom.Desc
+	descMemoryReplicaFallback *prom.Desc
+	descMemoryReplicaCreate   *prom.Desc
+	descMemoryReplicaCached   *prom.Desc
 }
 
 func newSchedulerCollector(register *metrictypes.CollectRegister, engine *workflow.Engine) *schedulerCollector {
@@ -60,6 +66,18 @@ func newSchedulerCollector(register *metrictypes.CollectRegister, engine *workfl
 		descRealtimeDestroyNum: prom.NewDesc(
 			metricPrefix+"realtime_destroy_num",
 			"Number of in-flight destroy requests", nil, nil),
+		descMemoryReplicaAcquire: prom.NewDesc(
+			"cube_memory_replica_acquire_total",
+			"NUMA memory replica acquire attempts by result", []string{"result"}, nil),
+		descMemoryReplicaFallback: prom.NewDesc(
+			"cube_memory_replica_fallback_total",
+			"NUMA memory replica fallbacks by reason", []string{"reason"}, nil),
+		descMemoryReplicaCreate: prom.NewDesc(
+			"cube_memory_replica_create_seconds_total",
+			"Total time spent creating NUMA memory replicas", nil, nil),
+		descMemoryReplicaCached: prom.NewDesc(
+			"cube_memory_replica_cached_objects",
+			"NUMA memory replicas created minus deleted", nil, nil),
 	}
 }
 
@@ -71,6 +89,10 @@ func (c *schedulerCollector) Describe(ch chan<- *prom.Desc) {
 	ch <- c.descNicQueues
 	ch <- c.descRealtimeCreateNum
 	ch <- c.descRealtimeDestroyNum
+	ch <- c.descMemoryReplicaAcquire
+	ch <- c.descMemoryReplicaFallback
+	ch <- c.descMemoryReplicaCreate
+	ch <- c.descMemoryReplicaCached
 }
 
 func (c *schedulerCollector) Collect(ch chan<- prom.Metric) {
@@ -144,6 +166,31 @@ func (c *schedulerCollector) Collect(ch chan<- prom.Metric) {
 	// per-request flying counts that the cubebox service does not own.
 	emit(c.descRealtimeCreateNum, float64(c.workflowEngine.GetFlowOnFlyingRequests("create")))
 	emit(c.descRealtimeDestroyNum, float64(c.workflowEngine.GetFlowOnFlyingRequests("destroy")))
+
+	replica := storage.SnapshotMemoryReplicaMetrics()
+	emitLabeled := func(desc *prom.Desc, value float64, labels ...string) {
+		metric, err := prom.NewConstMetric(desc, prom.CounterValue, value, labels...)
+		if err == nil {
+			ch <- metric
+		}
+	}
+	for result, value := range map[string]uint64{
+		"hit":      replica.AcquireHit,
+		"created":  replica.AcquireCreated,
+		"fallback": replica.AcquireFallback,
+		"error":    replica.AcquireError,
+	} {
+		emitLabeled(c.descMemoryReplicaAcquire, float64(value), result)
+	}
+	for reason, value := range replica.FallbackByReason {
+		emitLabeled(c.descMemoryReplicaFallback, float64(value), reason)
+	}
+	if metric, err := prom.NewConstMetric(c.descMemoryReplicaCreate, prom.CounterValue, replica.CreateSeconds); err == nil {
+		ch <- metric
+	}
+	if metric, err := prom.NewConstMetric(c.descMemoryReplicaCached, prom.GaugeValue, float64(replica.CachedObjects)); err == nil {
+		ch <- metric
+	}
 }
 
 func initPrometheusMetrics(register *metrictypes.CollectRegister, engine *workflow.Engine) {

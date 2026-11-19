@@ -1088,6 +1088,29 @@ func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.
 		}
 		return cowFileURLFromPath(cloned.FilePath), cloned.VolumeName, nil
 	}
+	if normalizedBackend, backendErr := cow.NormalizeBackend(backend); backendErr == nil && normalizedBackend == cow.BackendXFS && opts.GetNumaNode() >= 0 && numaMemoryReplicaEnabled() {
+		logicalID := snapshotLogicalID(annotations)
+		entry, entryErr := GetLocalSnapshotFor(ctx, backend, logicalID)
+		if entryErr == nil && entry != nil {
+			if replicaVol, replicaKind, used := SelectSnapshotMemory(entry, opts.GetNumaNode()); used {
+				recordMemoryReplicaAcquire("hit")
+				volumeName, volumeKind = replicaVol, replicaKind
+			} else if NumaMemoryReplicaEligible(entry) {
+				updated, created, ensureErr := l.ensureSnapshotMemoryReplica(ctx, backend, logicalID, opts.GetNumaNode())
+				if ensureErr != nil {
+					log.G(ctx).Warnf("snapshot %s: cannot create NUMA%d memory replica, using canonical %s: %v",
+						logicalID, opts.GetNumaNode(), volumeName, ensureErr)
+				} else if created && updated != nil {
+					if replicaVol, replicaKind, used := SelectSnapshotMemory(updated, opts.GetNumaNode()); used {
+						recordMemoryReplicaAcquire("hit")
+						volumeName, volumeKind = replicaVol, replicaKind
+					}
+				}
+			}
+		} else if entryErr != nil {
+			log.G(ctx).Warnf("snapshot %s: NUMA memory replica catalog lookup failed, using canonical: %v", logicalID, entryErr)
+		}
+	}
 	normalizedKind, err := normalizeCowKind(volumeKind)
 	if err != nil {
 		return "", "", fmt.Errorf("invalid snapshot memory volume kind %q: %w", volumeKind, err)
@@ -1154,6 +1177,14 @@ func (l *local) releaseImportedMemoryVol(ctx context.Context, backend string, in
 	if err := store.DeleteByKind(ctx, name, cowKindVolume); err != nil {
 		warnVolumeDeleteDeferred(ctx, name, cowKindVolume, err)
 	}
+}
+
+func snapshotLogicalID(annotations map[string]string) string {
+	logicalID := strings.TrimSpace(annotations[constants.MasterAnnotationRuntimeSnapshotID])
+	if logicalID == "" {
+		logicalID = strings.TrimSpace(annotations[constants.MasterAnnotationAppSnapshotTemplateID])
+	}
+	return logicalID
 }
 
 // resolveSnapshotMemoryVolFromCatalog returns the (memory_vol, memory_kind)

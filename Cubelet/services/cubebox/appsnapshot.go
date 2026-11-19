@@ -560,27 +560,34 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	rsp.ShimVersion = versions.Shim
 	rsp.EnvdVersion = envdVersion
 
+	numaMemoryReplicas, replicaErr := storage.CreateMemoryReplicasForFullSnapshot(ctx, backend, templateID, memoryObject)
+	if replicaErr != nil {
+		stepLog.Warnf("failed to create NUMA memory replicas for %s: %v", templateID, replicaErr)
+	}
+
 	// Persist the catalog entry so subsequent create-from-template and
 	// CleanupTemplate calls can resolve physical refs locally. The build
 	// rootfs name is deterministic on cubelet side; we record it so cleanup
 	// works even if the live volume has already been removed by other paths.
 	if err := storage.WriteSnapshotCatalogFor(backend, &storage.SnapshotCatalogEntry{
-		SnapshotID:        templateID,
-		InstanceType:      "cubebox",
-		SpecDir:           specDir,
-		SnapshotPath:      layout.Home,
-		MetaDir:           layout.MetaDir,
-		RootfsVol:         rootfsObject.Name,
-		RootfsKind:        rootfsObject.Kind,
-		MemoryVol:         memoryObject.Name,
-		MemoryKind:        memoryObject.Kind,
-		MetadataVol:       storage.S3MetadataCatalogVol(backend, templateID),
-		MetadataKind:      storage.S3MetadataCatalogKind(backend),
-		BuildRootfsVol:    storage.TemplateBuildRootfsName(templateID),
-		BuildRootfsKind:   storage.CowKindVolume,
-		RootfsSizeBytes:   rootfsObject.SizeBytes,
-		ComponentVersions: frozenVersions,
-		Kind:              storage.CatalogKindTemplate,
+		SnapshotID:         templateID,
+		InstanceType:       "cubebox",
+		SpecDir:            specDir,
+		SnapshotPath:       layout.Home,
+		MetaDir:            layout.MetaDir,
+		RootfsVol:          rootfsObject.Name,
+		RootfsKind:         rootfsObject.Kind,
+		MemoryVol:          memoryObject.Name,
+		MemoryKind:         memoryObject.Kind,
+		MemorySnapshotType: storage.MemorySnapshotTypeFull,
+		NumaMemoryReplicas: numaMemoryReplicas,
+		MetadataVol:        storage.S3MetadataCatalogVol(backend, templateID),
+		MetadataKind:       storage.S3MetadataCatalogKind(backend),
+		BuildRootfsVol:     storage.TemplateBuildRootfsName(templateID),
+		BuildRootfsKind:    storage.CowKindVolume,
+		RootfsSizeBytes:    rootfsObject.SizeBytes,
+		ComponentVersions:  frozenVersions,
+		Kind:               storage.CatalogKindTemplate,
 	}); err != nil {
 		if backend == cow.BackendJFS {
 			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown

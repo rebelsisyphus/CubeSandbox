@@ -179,3 +179,58 @@ func TestResolveCleanupRefsCatalogWithoutBuildRootfsStillCleansFromCatalog(t *te
 	assert.Equal(t, "rt-rootfs", refs[0].Name)
 	assert.Equal(t, "rt-mem", refs[1].Name)
 }
+
+func TestResolveCleanupRefsCatalogIncludesNumaMemoryReplicas(t *testing.T) {
+	templateID := "tpl-resolve-numa"
+	snapDir := filepath.Join(t.TempDir(), "snap-"+templateID)
+	seedCatalogForTest(t, &storage.SnapshotCatalogEntry{
+		SnapshotID:   templateID,
+		SnapshotPath: snapDir,
+		RootfsVol:    "cat-rootfs",
+		RootfsKind:   storage.CowKindSnapshot,
+		MemoryVol:    "cat-mem",
+		MemoryKind:   storage.CowKindVolume,
+		Kind:         storage.CatalogKindTemplate,
+		NumaMemoryReplicas: map[string]storage.SnapshotMemoryReplica{
+			"1": {Volume: "cat-mem-numa1", Kind: storage.CowKindSnapshot},
+			"0": {Volume: "cat-mem-numa0", Kind: storage.CowKindSnapshot},
+		},
+	})
+
+	refs, _, err := resolveCleanupRefs(context.Background(), "", templateID, nil, "")
+	require.NoError(t, err)
+	names := cleanupRefNames(refs)
+	assert.Contains(t, names, "cat-mem-numa0")
+	assert.Contains(t, names, "cat-mem-numa1")
+	for _, ref := range refs {
+		if ref.Name == "cat-mem-numa0" || ref.Name == "cat-mem-numa1" {
+			assert.Equal(t, "memory_replica", ref.Role)
+			assert.Equal(t, storage.CowKindSnapshot, ref.Kind)
+		}
+	}
+}
+
+func TestResolveCleanupRefsLegacyObjectsMergeCatalogReplicas(t *testing.T) {
+	templateID := "tpl-resolve-legacy-numa"
+	snapDir := filepath.Join(t.TempDir(), "snap-"+templateID)
+	seedCatalogForTest(t, &storage.SnapshotCatalogEntry{
+		SnapshotID:   templateID,
+		SnapshotPath: snapDir,
+		RootfsVol:    "cat-rootfs",
+		MemoryVol:    "cat-mem",
+		Kind:         storage.CatalogKindTemplate,
+		NumaMemoryReplicas: map[string]storage.SnapshotMemoryReplica{
+			"2": {Volume: "cat-mem-numa2", Kind: storage.CowKindSnapshot},
+		},
+	})
+	objs := []*cubebox.CowObjectRef{
+		{Name: "explicit-rootfs", Kind: "snapshot", Role: "rootfs"},
+		{Name: "explicit-mem", Kind: "volume", Role: "memory"},
+	}
+	refs, _, err := resolveCleanupRefs(context.Background(), "", templateID, objs, "/legacy/path")
+	require.NoError(t, err)
+	names := cleanupRefNames(refs)
+	assert.Contains(t, names, "explicit-rootfs")
+	assert.Contains(t, names, "explicit-mem")
+	assert.Contains(t, names, "cat-mem-numa2")
+}

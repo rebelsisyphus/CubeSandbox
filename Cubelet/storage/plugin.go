@@ -102,6 +102,11 @@ type Config struct {
 	StorageBackend string          `toml:"storage_backend"`
 	Cow            CowInlineConfig `toml:"cow"`
 
+	// NUMA memory snapshot replicas are an XFS-only, opt-in optimization.
+	// mode: off|per_node. create_on: snapshot|first_restore.
+	NumaMemoryReplicaMode     string `toml:"numa_memory_replica_mode"`
+	NumaMemoryReplicaCreateOn string `toml:"numa_memory_replica_create_on"`
+
 	// CmdTimeout overrides the per-command timeout for utils.ExecV
 	// invocations in shell.go (cp / truncate / e2fsck / resize2fs /
 	// mkfs.ext4). Defaults to defaultCmdTimeout when zero. The slow
